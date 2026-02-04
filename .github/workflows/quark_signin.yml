@@ -2,99 +2,78 @@ name: Quark签到
 
 on:
   schedule:
-    - cron: '5 23 * * *'   # 北京时间 09:00 (UTC+8 -> UTC+1)
-    - cron: '0 5 * * *'   # 北京时间 13:00 (UTC+8 -> UTC+5)
+    - cron: '5 23 * * *'   # 北京时间 07:05 (UTC 23:05)
+    - cron: '0 5 * * *'    # 北京时间 13:00 (UTC 05:00)
   workflow_dispatch:      # 允许手动触发
 
 jobs:
-  check-if-already-signed:
+  check-and-sign:
     runs-on: ubuntu-latest
-    outputs:
-      skip: ${{ steps.check.outputs.skip }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v3
 
-      - name: 恢复签到成功记录缓存
-        id: cache-success-restore
+      - name: 获取当前日期
+        id: get-date
+        run: |
+          echo "today=$(TZ='Asia/Shanghai' date '+%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+          echo "hour=$(TZ='Asia/Shanghai' date '+%H')" >> "$GITHUB_OUTPUT"
+
+      - name: 检查今日签到缓存
+        id: cache-check
         uses: actions/cache@v4
         with:
           path: .last_success_date
-          key: last-success-marker-${{ github.repository }}
-          
-      - name: 检查缓存命中状态
-        run: |
-          echo "Cache hit: ${{ steps.cache-success-restore.outputs.cache-hit }}"
+          # 使用日期作为 key。如果今天已签到，这个 key 必然存在。
+          key: Quark-Sign-${{ steps.get-date.outputs.today }}
 
-      - name: 判断是否已签到
-        id: check
+      - name: 判断是否跳过
+        id: check_skip
         run: |
-          current_date=$(TZ='Asia/Shanghai' date '+%Y-%m-%d')
-          echo "当前北京时间: $current_date"
-
-          if [ -f .last_success_date ]; then
-            last_date=$(cat .last_success_date)
-            echo "上次签到日期: $last_date"
-            if [ "$last_date" = "$current_date" ]; then
-              echo "今天已成功签到，跳过执行。"
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+          if [ "${{ steps.cache-check.outputs.cache-hit }}" == "true" ]; then
+            echo "今天已签到成功，跳过本次执行。"
+            echo "should_skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "今日尚未成功记录，准备开始签到..."
+            echo "should_skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "今天尚未签到，继续执行。"
-          echo "skip=true" >> "$GITHUB_OUTPUT"
-
-  sign-in:
-    needs: check-if-already-signed
-    if: needs.check-if-already-signed.outputs.skip == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v3
-
-      - name: 随机延迟（早上）
-        if: github.event.schedule == '5 23 * * *'
+      - name: 随机延迟
+        if: steps.check_skip.outputs.should_skip == 'false'
         run: |
-          delay=$((RANDOM % 60))
-          echo "早上签到，延迟 $delay 秒后开始.."
-          sleep $delay
-
-      - name: 随机延迟（下午/手动触发）
-        if: github.event.schedule == '0 5 * * *' || github.event_name == 'workflow_dispatch'
-        run: |
-          delay=$((RANDOM % 30))
-          echo "下午兜底或手动触发，延迟 $delay 秒后开始.."
+          # 早上 (07:05) 延迟久一点
+          if [ "${{ steps.get-date.outputs.hour }}" -lt "10" ]; then
+            delay=$((RANDOM % 60))
+          else
+            delay=$((RANDOM % 30))
+          fi
+          echo "等待 $delay 秒后执行脚本..."
           sleep $delay
 
       - name: 设置Python环境
+        if: steps.check_skip.outputs.should_skip == 'false'
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
 
       - name: 安装依赖
+        if: steps.check_skip.outputs.should_skip == 'false'
         run: pip install requests
 
       - name: 执行签到脚本
+        if: steps.check_skip.outputs.should_skip == 'false'
         env:
           COOKIE_QUARK: ${{ secrets.COOKIE_QUARK }}
         run: python checkIn_Quark.py
 
-      - name: 标记今天签到成功
-        if: success()
+      - name: 记录成功标志
+        if: success() && steps.check_skip.outputs.should_skip == 'false'
         run: |
-          date_str=$(TZ='Asia/Shanghai' date '+%Y-%m-%d')
-          echo "$date_str" > .last_success_date
-          echo "已记录成功签到日期: $date_str"
+          echo "${{ steps.get-date.outputs.today }}" > .last_success_date
+          echo "签到成功，正在创建今日缓存标志..."
 
-      - name: 保存成功记录到缓存
-        if: success()
-        uses: actions/cache@v4
-        with:
-          path: .last_success_date
-          key: last-success-marker-${{ github.repository }}
-          restore-keys: |
-            last-success-marker-${{ github.repository }}
+      # 注意：actions/cache 在步骤失败时不会保存。只有上面脚本成功，才会保存这个 key 为今日日期的缓存。
+      # 下次运行（比如下午的 Cron）时，就会命中这个缓存。
 
       - name: 清理旧的工作流记录
         uses: Mattraks/delete-workflow-runs@main
